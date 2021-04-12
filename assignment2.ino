@@ -130,7 +130,7 @@ void setup() {
     xTaskCreate(
     TaskDiagnostic
     ,  "Diagnostics"   // A name 
-    ,  82  // Stack size 82
+    ,  87  // Stack size 82
     ,  NULL
     ,  1  // priority
     ,  NULL );
@@ -139,7 +139,7 @@ void setup() {
    xTaskCreate(
     TaskDeadReckoning
     ,  "Dead Reckoning"   // A name 
-    ,  150  // Stack size 142
+    ,  148  // Stack size 142
     ,  NULL
     ,  1  // priority
     ,  NULL );  
@@ -157,7 +157,7 @@ void setup() {
   xTaskCreate(
    TaskMonitor
     ,  "Velocity Monitoring"   // A name 
-    ,  130  // Stack size 113
+    ,  100  // Stack size 113
     ,  NULL
     ,  1  // priority
     ,  NULL );
@@ -237,10 +237,10 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
         lastDebounceDecreaseRight = TIME_MS;
       }
       
-      if ((increaseLeft == LOW) || (decreaseLeft == LOW) || (increaseRight == LOW) || (decreaseRight == LOW))
-        logOdometry(); 
-/*
-      unsigned temp;
+      //if ((increaseLeft == LOW) || (decreaseLeft == LOW) || (increaseRight == LOW) || (decreaseRight == LOW))
+      //  logOdometry(); 
+
+    /*  unsigned temp;
    temp = uxTaskGetStackHighWaterMark(NULL);
     
     if (!stack_hwm || temp < stack_hwm) {
@@ -280,7 +280,8 @@ static void TaskDeadReckoning( void * pvParameters ) {
         stack_hwm = temp;
         Serial.print(F(", High Watermark from function1: "));
         Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-      }*/
+      }
+      */
     }
     
     // no rotation, movement in straight line -> limiting case, else R -> infinity 
@@ -370,7 +371,8 @@ static void TaskDiagnostic( void *pvParameters ) {
         stack_hwm = temp;
         Serial.print(F(", High Watermark from function1: "));
         Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-      }*/
+      }
+      */
       }
     } 
        
@@ -451,7 +453,14 @@ static void TaskMonitor( void *pvParameters) {
           // update time of last blink 
           lastFlash = millis();
     
-          unsigned temp;
+          
+       }
+     } else {
+      flashCount = 0;
+     }      
+      lastAverageUpdate = millis();   
+    }
+    unsigned temp;
          temp = uxTaskGetStackHighWaterMark(NULL);
          
          if (!stack_hwm || temp < stack_hwm) {
@@ -459,12 +468,6 @@ static void TaskMonitor( void *pvParameters) {
             Serial.print(", High Watermark from function1: ");
             Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
          }
-       }
-     } else {
-      flashCount = 0;
-     }      
-      lastAverageUpdate = millis();   
-    }
     taskYIELD();
   }
 }
