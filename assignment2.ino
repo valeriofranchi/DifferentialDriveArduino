@@ -88,6 +88,13 @@ static void TaskProcessing ( void *pvParameters);
 static void TaskMonitor (void *pvParameters );
 static void TaskDeadReckoning (void *pvParameters );
 
+// task handle
+static TaskHandle_t xTaskHandle;
+
+static TimerHandle_t xProcessingTimer;
+
+static void vProcessingTimerCallback( TimerHandle_t xTimer );
+
 // interrupt handler function
 void breakInterruptHandler();
 void diagnosticInterruptHandler();
@@ -117,6 +124,13 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BRAKE_BUTTON), breakInterruptHandler, FALLING);
   attachInterrupt(digitalPinToInterrupt(DIAGNOSTIC_MODE_BUTTON), diagnosticInterruptHandler, LOW);
 
+  xProcessingTimer = xTimerCreate(   "Processing timer",
+                                      SENSOR_PROCESSING_PERIOD,   
+                                      pdFALSE,              
+                                      ( void * ) 0,           
+                                      vProcessingTimerCallback        
+                                  );
+
   // task for updating motor speeeds 
   xTaskCreate(
     TaskUpdateMotorSpeeds
@@ -145,13 +159,13 @@ void setup() {
     ,  NULL );  
 
   // task for sensor processing 
-  /*xTaskCreate(
+  xTaskCreate(
     TaskProcessing
     ,  "Sensor Processing"   // A name 
-    ,  256  // Stack size
+    ,  100  // Stack size 87
     ,  NULL
     ,  2  // priority
-    ,  NULL );*/
+    ,  &xTaskHandle );
 
   // task for velocity monitoring 
   xTaskCreate(
@@ -162,15 +176,9 @@ void setup() {
     ,  1  // priority
     ,  NULL );
 
-  // start timer     
-  //xSensorProcessingTimerStarted = xTimerStart (xSensorProcessingTimer, 0 );
-  
-  //if(xSensorProcessingTimerStarted == pdPASS)
-  //{
-    // start scheduler so created task start executing 
-    vTaskStartScheduler();
-  //}
-//}
+  // start scheduler so created task start executing 
+  vTaskStartScheduler();
+
 }
 
 void loop() {  
@@ -252,6 +260,7 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
     changeMotorSpeeds(left, right, 0);
     }
     // delay task 
+    //vTaskPrioritySet(xTaskHandle, 2);
     taskYIELD();
   } 
 }
@@ -270,7 +279,7 @@ static void TaskDeadReckoning( void * pvParameters ) {
 
     // print odometry every second 
     if ( (millis() - lastPrintTime) > ODOMETRY_UPDATE_TIME * 1000 ) {
-      logOdometry();
+      //logOdometry();
       lastPrintTime = millis();
 /*
       unsigned temp;
@@ -312,6 +321,7 @@ static void TaskDeadReckoning( void * pvParameters ) {
       pose.rotVel = omega;
    }
     // delay task 
+    //vTaskPrioritySet(xTaskHandle, 2);
     taskYIELD();
   }
 }
@@ -377,24 +387,39 @@ static void TaskDiagnostic( void *pvParameters ) {
     } 
        
     // delay task 
+    //vTaskPrioritySet(xTaskHandle, 2);
     taskYIELD();
   }
 }
 
 static void TaskProcessing ( void *pvParameters) {
   (void) pvParameters;
-
-  //const TickType_t xDelay = pdMS_TO_TICKS( SENSOR_PROCESSING_PERIOD - CPU_BUSY_PERIOD);
-  const TickType_t xDelay = pdMS_TO_TICKS( 30UL );
-
+  
   for (;;) {
-    long initialTime = millis();
-    while ((millis() - initialTime) < CPU_BUSY_PERIOD) {
+    long initialTime = TIME_MS;
+    xTimerStop( xProcessingTimer, 0);
+    while ((TIME_MS - initialTime) < CPU_BUSY_PERIOD) {
       ;
     }
-    Serial.println("check");
-    vTaskDelay(xDelay);
+    
+    xTimerStart( xProcessingTimer, 0);
+    
+     unsigned temp;
+      temp = uxTaskGetStackHighWaterMark(NULL);
+    
+      if (!stack_hwm || temp < stack_hwm) {
+        stack_hwm = temp;
+        Serial.print(F(", High Watermark from function1: "));
+        Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
+      }
+    vTaskPrioritySet(NULL, 1);
   }  
+}
+
+static void vProcessingTimerCallback( TimerHandle_t xTimer ) {
+  static long start = TIME_MS;
+  if ( (TIME_MS - start) > (SENSOR_PROCESSING_PERIOD - CPU_BUSY_PERIOD)) 
+    vTaskPrioritySet(xTaskHandle, 2);  
 }
 
 static void TaskMonitor( void *pvParameters) {
@@ -460,6 +485,7 @@ static void TaskMonitor( void *pvParameters) {
      }      
       lastAverageUpdate = millis();   
     }
+    /*
     unsigned temp;
          temp = uxTaskGetStackHighWaterMark(NULL);
          
@@ -468,6 +494,8 @@ static void TaskMonitor( void *pvParameters) {
             Serial.print(", High Watermark from function1: ");
             Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
          }
+    taskYIELD();
+    */
     taskYIELD();
   }
 }
@@ -480,6 +508,7 @@ void breakInterruptHandler() {
     left = 0;
     right = 0;
     changeMotorSpeeds(left, right, 1);
+    logOdometry();
     
     brakeState = 1;
 
