@@ -25,6 +25,7 @@
 #define NUM_FLASHES         (FLASH_DURATION * FLASH_FREQ)
 
 #define DISTANCE_BETWEEN_WHEEL_CENTRES  2
+#define WHEEL_RADIUS                    0.5
 #define ODOMETRY_UPDATE_TIME            1
 
 #define TO_PWM(x)         map((x), -MAX_SPEED, MAX_SPEED, -PWM_MAX_SPEED, PWM_MAX_SPEED)
@@ -257,11 +258,11 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
         Serial.print(F(", High Watermark from function1: "));
         Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
     }*/
-    
-    changeMotorSpeeds(left, right, 0);
     }
+    
+    //changeMotorSpeeds(0);
+    
     // delay task 
-    //vTaskPrioritySet(xTaskHandle, 2);
     taskYIELD();
   } 
 }
@@ -275,12 +276,13 @@ static void TaskDeadReckoning( void * pvParameters ) {
   float dt = 0;
   float R = 0; float omega = 0;
   float ICCx = 0; float ICCy = 0;
+  float left_m = 0; float right_m = 0;
 
   for (;;) {
 
     // print odometry every second 
     if ( (TIME_MS - lastPrintTime) > ODOMETRY_UPDATE_TIME * 1000 ) {
-      logOdometry();
+      //logOdometry();
       lastPrintTime = TIME_MS;
 /*
       unsigned temp;
@@ -296,20 +298,24 @@ static void TaskDeadReckoning( void * pvParameters ) {
     
     // update change in time 
     dt = (TIME_MS - lastUpdateTime) / 1000.0;
+
+    // velocities in m/s
+    left_m = left * WHEEL_RADIUS;
+    right_m = right * WHEEL_RADIUS; 
     
     // no rotation, movement in straight line -> limiting case, else R -> infinity 
     if (left == right) {      
       lastUpdateTime = TIME_MS;
       
-      pose.x += right * cos(pose.theta) * dt;
-      pose.y += right * sin(pose.theta) * dt;
+      pose.x += right_m * cos(pose.theta) * dt;
+      pose.y += right_m * sin(pose.theta) * dt;
 
       pose.linearVel = right;
       pose.rotVel = 0.0;
     } else {     
       lastUpdateTime = TIME_MS;
-      R = (DISTANCE_BETWEEN_WHEEL_CENTRES / 2) * ( (left + right) / (right - left) );
-      omega = (right - left) / DISTANCE_BETWEEN_WHEEL_CENTRES;
+      R = (DISTANCE_BETWEEN_WHEEL_CENTRES / 2) * ( (left_m + right_m) / (right_m - left_m) );
+      omega = (right_m - left_m) / DISTANCE_BETWEEN_WHEEL_CENTRES;
   
       ICCx = pose.x - R * sin(pose.theta);
       ICCy = pose.y + R * cos(pose.theta);
@@ -319,11 +325,10 @@ static void TaskDeadReckoning( void * pvParameters ) {
 
       pose.theta += omega * dt;    
 
-      pose.linearVel = (right + left) / 2;
+      pose.linearVel = (right_m + left_m) / 2;
       pose.rotVel = omega;
    }
     // delay task 
-    //vTaskPrioritySet(xTaskHandle, 2);
     taskYIELD();
   }
 }
@@ -438,6 +443,8 @@ static void TaskMonitor( void *pvParameters) {
   float sumLeft = 0;
   float sumRight = 0;
   uint8_t curr = 0;
+
+  long start = 0;
   
   
     // initialize 
@@ -449,49 +456,76 @@ static void TaskMonitor( void *pvParameters) {
   long lastAverageUpdate = TIME_MS;
   long lastFlash = TIME_MS;
   int flashCount = 0;
+  bool flashing = 0;
   
   for (;;) {
+    // if diagnostic mode is off
+    if (diagnosticState == 0) {
 
-    if ( ((TIME_MS - lastAverageUpdate) > ((1 / MONITOR_FREQ) * 1000)) && diagnosticState == 0) {
-      
-      // remove pointer element from sum
-      sumLeft -= TO_RPM(measurementsLeft[curr]);
-      sumRight -= TO_RPM(measurementsRight[curr]);
-  
-      // add measurements 
-      measurementsLeft[curr] = TO_PWM(left);
-      measurementsRight[curr] = TO_PWM(right);
-      
-      // rolling sum 
-      sumLeft += left;
-      sumRight += right;
-      
-      // increase counter
-      curr++; 
-      if (curr >= NUMBER_MEASUREMENTS_AVERAGE) {
-        curr = 0;
+      // at 2Hz frequency update the rolling average 
+      if ( (TIME_MS - lastAverageUpdate) > ((1 / MONITOR_FREQ) * 1000)) {
+        
+        // remove pointer element from sum
+        sumLeft -= TO_RPM(measurementsLeft[curr]);
+        sumRight -= TO_RPM(measurementsRight[curr]);
+    
+        // add measurements 
+        measurementsLeft[curr] = TO_PWM(left);
+        measurementsRight[curr] = TO_PWM(right);
+        
+        // rolling sum 
+        sumLeft += left;
+        sumRight += right;
+        
+        // increase counter
+        curr++; 
+        if (curr >= NUMBER_MEASUREMENTS_AVERAGE) {
+          curr = 0;
+        }
+        lastAverageUpdate = TIME_MS; 
       }
+      
       // check if rolling average is higher than maximum
       if ((sumLeft / NUMBER_MEASUREMENTS_AVERAGE) > MAX_ROLLING_AVERAGE && ((sumRight / NUMBER_MEASUREMENTS_AVERAGE) > MAX_ROLLING_AVERAGE)) {
-          
-        if ( ((TIME_MS - lastFlash) > ((1 / FLASH_FREQ) * 1000)) && (flashCount < NUM_FLASHES)) {
-           // blink LED
+        // blink LED
+        digitalWrite(MONITOR_LED, HIGH);
+        vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
+        digitalWrite(MONITOR_LED, LOW);
+        vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
+/*
+           unsigned temp;
+         temp = uxTaskGetStackHighWaterMark(NULL);
+         
+         if (!stack_hwm || temp < stack_hwm) {
+            stack_hwm = temp;
+            Serial.print(", High Watermark from function1: ");
+            Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
+         }
+         */
+
+        flashing = 1;
+        
+     } else {
+      // if not above average but was flashing, continue flashing for 3 seconds, otherwise do nothing 
+      if ( (flashing == 1) && (flashCount < NUM_FLASHES)) { 
+          // blink LED
           digitalWrite(MONITOR_LED, HIGH);
+          vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
           digitalWrite(MONITOR_LED, LOW);
+          vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
     
           // increase counter 
           flashCount++;
-          if (flashCount == NUM_FLASHES)
+          if (flashCount == NUM_FLASHES) {
             flashCount = 0;
+            flashing = 0;
+          }
     
           // update time of last blink 
           lastFlash = TIME_MS;
-       }
-     } else {
-      flashCount = 0;
-     }      
-      lastAverageUpdate = TIME_MS;   
+      }  
     }
+  }
     /*
     unsigned temp;
          temp = uxTaskGetStackHighWaterMark(NULL);
@@ -501,7 +535,6 @@ static void TaskMonitor( void *pvParameters) {
             Serial.print(", High Watermark from function1: ");
             Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
          }
-    taskYIELD();
     */
     taskYIELD();
   }
@@ -514,7 +547,7 @@ void breakInterruptHandler() {
     // update state 
     left = 0;
     right = 0;
-    changeMotorSpeeds(left, right, 1);
+    changeMotorSpeeds(1);
     //logOdometry();
     
     brakeState = 1;
@@ -557,16 +590,16 @@ void logOdometry()
   Serial.println(pose.theta);
 }
 
-void changeMotorSpeeds(float left, float right, int brake)
+void changeMotorSpeeds(int brake)
 {   
   // change right motor
   analogWrite(PWM_RIGHT_OUTPUT, abs(TO_PWM(right))); // speed
-  digitalWrite(DIR_RIGHT_OUTPUT, (right > 0) ? HIGH : LOW); // direction
+  digitalWrite(DIR_RIGHT_OUTPUT, (right > 0) ? LOW : LOW); // direction
   digitalWrite(BRAKE_RIGHT, brake); // don't brake 
   
   // change left motor
   analogWrite(PWM_LEFT_OUTPUT, abs(TO_PWM(left))); // speed
-  digitalWrite(DIR_LEFT_OUTPUT, (left > 0) ? HIGH : LOW); // direction
+  digitalWrite(DIR_LEFT_OUTPUT, (left > 0) ? LOW : LOW); // direction
   digitalWrite(BRAKE_LEFT, brake); // don't brake
 
 }
