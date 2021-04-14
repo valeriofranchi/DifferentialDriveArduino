@@ -31,7 +31,7 @@
 #define TO_PWM(x)         map((x), -MAX_SPEED, MAX_SPEED, -PWM_MAX_SPEED, PWM_MAX_SPEED)
 #define TO_RPM(x)         map((x), -PWM_MAX_SPEED, PWM_MAX_SPEED, -MAX_SPEED, MAX_SPEED)
 
-#define DEBOUNCE_DELAY    500
+#define DEBOUNCE_DELAY    1500 //500
 
 #define DIAGNOSTIC_PERIOD           2000UL
 #define SENSOR_PROCESSING_PERIOD    20UL
@@ -78,18 +78,20 @@ typedef struct Pose{
 }Pose;
 Pose pose;
 
-// global variable for state of breaks (engaged or not) and diagnostic 
+/* Global variables for the state of breaks (engaged or not) and diagnostic */
 int brakeState = 0;
 int diagnosticState = 0;
 
-// processes 
+bool velUpdated = false;
+
+/* FreeRTOS Tasks */
 static void TaskUpdateMotorSpeeds( void *pvParameters );
 static void TaskDiagnostic( void *pvParameters );
 static void TaskProcessing ( void *pvParameters);
 static void TaskMonitor (void *pvParameters );
 static void TaskDeadReckoning (void *pvParameters );
 
-// sensor processing task handle, timer handle and timer callback
+/* Sensor processing task handle, timer handle and timer callback */
 static TaskHandle_t xTaskHandle;
 static TimerHandle_t xProcessingTimer;
 static void vProcessingTimerCallback( TimerHandle_t xTimer );
@@ -98,10 +100,13 @@ static void vProcessingTimerCallback( TimerHandle_t xTimer );
 void breakInterruptHandler();
 void diagnosticInterruptHandler();
 
+SemaphoreHandle_t xMutex;
+
 // debounce time for diagnostic  
 volatile unsigned long lastDebounceDiagnostic = 0;
 
-void setup() {
+void setup() {    
+  xMutex = xSemaphoreCreateMutex();
   // set strings for logging 
   outputs[0] = "v: "; outputs[1] = "omega: "; outputs[2] = "x: ";
   outputs[3] = "y: "; outputs[4] = "theta: ";                          
@@ -122,6 +127,9 @@ void setup() {
   // initialize serial communications at 9600 bps
   Serial.begin(9600); 
 
+  while (!Serial)
+    ; // wait for serial port to connect
+
   // attach interrupt handler to break button and diagnostic button
   attachInterrupt(digitalPinToInterrupt(BRAKE_BUTTON), breakInterruptHandler, FALLING);
   attachInterrupt(digitalPinToInterrupt(DIAGNOSTIC_MODE_BUTTON), diagnosticInterruptHandler, LOW);
@@ -137,8 +145,8 @@ void setup() {
   // task for updating motor speeeds 
   xTaskCreate(
     TaskUpdateMotorSpeeds
-    ,  "Updated Left Motor Speed"   // A name
-    ,  100  // Stack size 78
+    ,  "Updated Motor Speeds"   // A name
+    ,  100  // Stack size 100
     ,  NULL
     ,  1  // priority
     ,  NULL );
@@ -147,7 +155,7 @@ void setup() {
     xTaskCreate(
     TaskDiagnostic
     ,  "Diagnostics"   // A name 
-    ,  87  // Stack size 82
+    ,  87  // Stack size 87
     ,  NULL
     ,  1  // priority
     ,  NULL );
@@ -156,7 +164,7 @@ void setup() {
    xTaskCreate(
     TaskDeadReckoning
     ,  "Dead Reckoning"   // A name 
-    ,  148  // Stack size 142
+    ,  148  // Stack size 148
     ,  NULL
     ,  1  // priority
     ,  NULL );  
@@ -165,7 +173,7 @@ void setup() {
   xTaskCreate(
     TaskProcessing
     ,  "Sensor Processing"   // A name 
-    ,  100  // Stack size 87
+    ,  80  // Stack size 100
     ,  NULL
     ,  2  // priority
     ,  &xTaskHandle );
@@ -181,9 +189,11 @@ void setup() {
 
   // start scheduler so created task start executing 
   vTaskStartScheduler();
+
 }
 
 void loop() {  
+// Empty. Things are done in Tasks.
 }
 
 void TaskUpdateMotorSpeeds( void *pvParameters) {
@@ -194,73 +204,94 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
   long lastDebounceIncreaseLeft = 0;
   long lastDebounceDecreaseRight = 0;
   long lastDebounceIncreaseRight = 0;
+
+  bool speedChanged = false;
   
   for (;;)
   {  
-    if (brakeState == 0) {
+    if (xSemaphoreTake( xMutex, (TickType_t) 1 ) == pdPASS) {
+      if (brakeState == 0) {
+  
+        // check button inputs 
+        int increaseLeft = digitalRead(INCREASE_LEFT_BUTTON);
+        int decreaseLeft = digitalRead(DECREASE_LEFT_BUTTON);
+        int increaseRight = digitalRead(INCREASE_RIGHT_BUTTON);
+        int decreaseRight = digitalRead(DECREASE_RIGHT_BUTTON);
 
-      // check button inputs 
-      int increaseLeft = digitalRead(INCREASE_LEFT_BUTTON);
-      int decreaseLeft = digitalRead(DECREASE_LEFT_BUTTON);
-      int increaseRight = digitalRead(INCREASE_RIGHT_BUTTON);
-      int decreaseRight = digitalRead(DECREASE_RIGHT_BUTTON);
-      
-      // if last debounce time is more than a threshold, enter loop
-      if ( ((TIME_MS - lastDebounceIncreaseLeft) > DEBOUNCE_DELAY) && (increaseLeft == LOW) ) {
-        // if button is pressed and break is not activated increase speed
-        left += SPEED_INCREASE;   
-        if (left > MAX_SPEED) 
-          left = MAX_SPEED;
+        // if last debounce time is more than a threshold, enter loop
+        if ( ((TIME_MS - lastDebounceIncreaseLeft) > DEBOUNCE_DELAY) && (increaseLeft == LOW) ) {
+          // if button is pressed and break is not activated increase speed
+          Serial.println("increasing left");
+          speedChanged = true;
+          left += SPEED_INCREASE;   
+          if (left > MAX_SPEED) 
+            left = MAX_SPEED;
+          
+          lastDebounceIncreaseLeft = TIME_MS;
+        }
         
-        lastDebounceIncreaseLeft = TIME_MS;
-      }
-      
-      // if last debounce time is more than a threshold, enter loop        
-      if ( (TIME_MS - lastDebounceDecreaseLeft > DEBOUNCE_DELAY) && (decreaseLeft == LOW) ) {
-        // if button is pressed and break is not activated decrease speed
-        left -= SPEED_DECREASE;
-        if (left < -MAX_SPEED) 
-          left = -MAX_SPEED;
+        // if last debounce time is more than a threshold, enter loop        
+        if ( (TIME_MS - lastDebounceDecreaseLeft > DEBOUNCE_DELAY) && (decreaseLeft == LOW) ) {
+          // if button is pressed and break is not activated decrease speed
+          Serial.println("decreasing left");
+          speedChanged = true;
+          left -= SPEED_DECREASE;
+          if (left < -MAX_SPEED) 
+            left = -MAX_SPEED;
+          
+          lastDebounceDecreaseLeft = TIME_MS;
+        }
         
-        lastDebounceDecreaseLeft = TIME_MS;
-      }
-      
-      // if last debounce time is more than a threshold, enter loop
-      if ( ((TIME_MS - lastDebounceIncreaseRight) > DEBOUNCE_DELAY) && (increaseRight == LOW) ) {
+        // if last debounce time is more than a threshold, enter loop
+        if ( ((TIME_MS - lastDebounceIncreaseRight) > DEBOUNCE_DELAY) && (increaseRight == LOW) ) {
+          
+          // if button is pressed and break is not activated increase speed
+          Serial.println("increasing right");
+          speedChanged = true;
+          right += SPEED_INCREASE;      
+          if (right > MAX_SPEED) 
+            right = MAX_SPEED;
+          
+          lastDebounceIncreaseRight = TIME_MS;
+        }
         
-        // if button is pressed and break is not activated increase speed
-        right += SPEED_INCREASE;      
-        if (right > MAX_SPEED) 
-          right = MAX_SPEED;
-        
-        lastDebounceIncreaseRight = TIME_MS;
-      }
-      
-      // if last debounce time is more than a threshold, enter loop
-      if ( ((TIME_MS - lastDebounceDecreaseRight) > DEBOUNCE_DELAY) && (decreaseRight == LOW) ) {
-        
-        // if button is pressed and break is not activated decrease speed
-        right -= SPEED_DECREASE;      
-        if (right < -MAX_SPEED) 
-          right = -MAX_SPEED;
-        
-        lastDebounceDecreaseRight = TIME_MS;
-      }
-      
-      //if ((increaseLeft == LOW) || (decreaseLeft == LOW) || (increaseRight == LOW) || (decreaseRight == LOW))
-      //  logOdometry(); 
-
-    /*  unsigned temp;
-   temp = uxTaskGetStackHighWaterMark(NULL);
+        // if last debounce time is more than a threshold, enter loop
+        if ( ((TIME_MS - lastDebounceDecreaseRight) > DEBOUNCE_DELAY) && (decreaseRight == LOW) ) {
+          
+          // if button is pressed and break is not activated decrease speed
+          Serial.println("decreasing right");
+          speedChanged = true;
+          right -= SPEED_DECREASE;      
+          if (right < -MAX_SPEED) 
+            right = -MAX_SPEED;
+          
+          lastDebounceDecreaseRight = TIME_MS;
+        }
+  
+        if (speedChanged == true) {
+  
+            changeMotorSpeeds(0);
+            Serial.println("logging");
+            speedChanged = false;
+            //logOdometry(); 
+            //velUpdated = true;
     
-    if (!stack_hwm || temp < stack_hwm) {
-        stack_hwm = temp;
-        Serial.print(F(", High Watermark from function1: "));
-        Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-    }*/
+            // unsigned temp;
+            // temp = uxTaskGetStackHighWaterMark(NULL);
+          /*
+            if (!stack_hwm || temp < stack_hwm) {
+                stack_hwm = temp;
+                Serial.print(F(", High Watermark from function1: "));
+                Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
+            }  
+            */
+        }    
+      }
+      xSemaphoreGive( xMutex );
     }
+    //xSemaphoreGive( xMutex );
     
-    //changeMotorSpeeds(0);
+    
     
     // delay task 
     taskYIELD();
@@ -280,54 +311,52 @@ static void TaskDeadReckoning( void * pvParameters ) {
 
   for (;;) {
 
-    // print odometry every second 
-    if ( (TIME_MS - lastPrintTime) > ODOMETRY_UPDATE_TIME * 1000 ) {
-      //logOdometry();
-      lastPrintTime = TIME_MS;
-/*
-      unsigned temp;
-      temp = uxTaskGetStackHighWaterMark(NULL);
+    if (xSemaphoreTake( xMutex, (TickType_t) 1 ) == pdPASS) {
     
-      if (!stack_hwm || temp < stack_hwm) {
-        stack_hwm = temp;
-        Serial.print(F(", High Watermark from function1: "));
-        Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-      }
-      */
-    }
-    
-    // update change in time 
-    dt = (TIME_MS - lastUpdateTime) / 1000.0;
-
-    // velocities in m/s
-    left_m = left * WHEEL_RADIUS;
-    right_m = right * WHEEL_RADIUS; 
-    
-    // no rotation, movement in straight line -> limiting case, else R -> infinity 
-    if (left == right) {      
-      lastUpdateTime = TIME_MS;
-      
-      pose.x += right_m * cos(pose.theta) * dt;
-      pose.y += right_m * sin(pose.theta) * dt;
-
-      pose.linearVel = right;
-      pose.rotVel = 0.0;
-    } else {     
-      lastUpdateTime = TIME_MS;
-      R = (DISTANCE_BETWEEN_WHEEL_CENTRES / 2) * ( (left_m + right_m) / (right_m - left_m) );
-      omega = (right_m - left_m) / DISTANCE_BETWEEN_WHEEL_CENTRES;
-  
-      ICCx = pose.x - R * sin(pose.theta);
-      ICCy = pose.y + R * cos(pose.theta);
+      // print odometry every second 
+      if ((TIME_MS - lastPrintTime) > ODOMETRY_UPDATE_TIME * 1000) {      
+       
+        logOdometry();
+        lastPrintTime = TIME_MS;
+        //if (velUpdated)
+        //  velUpdated = !velUpdated;
+      }         
         
-      pose.x = ( cos(omega * dt) * (pose.x - ICCx) ) + ( -sin(omega * dt) * (pose.y - ICCy) ) + ICCx; 
-      pose.y = ( sin(omega * dt) * (pose.x - ICCx) ) + ( cos(omega * dt) * (pose.y - ICCy) ) + ICCy;
+      // update change in time 
+      dt = (TIME_MS - lastUpdateTime) / 1000.0;
+  
+      // velocities in m/s
+      left_m = left * WHEEL_RADIUS;
+      right_m = right * WHEEL_RADIUS;
+ 
+      lastUpdateTime = TIME_MS;
+      // no rotation, movement in straight line -> limiting case, else R -> infinity 
+      if (left_m == right_m) {      
+        
+        pose.x += right_m * cos(pose.theta) * dt;
+        pose.y += right_m * sin(pose.theta) * dt;
+  
+        pose.linearVel = right;
+        pose.rotVel = 0.0;
+      } else {     
+        R = (DISTANCE_BETWEEN_WHEEL_CENTRES / 2) * ( (left_m + right_m) / (right_m - left_m) );
+        omega = (right_m - left_m) / DISTANCE_BETWEEN_WHEEL_CENTRES;
+    
+        ICCx = pose.x - R * sin(pose.theta);
+        ICCy = pose.y + R * cos(pose.theta);
+          
+        pose.x = ( cos(omega * dt) * (pose.x - ICCx) ) + ( -sin(omega * dt) * (pose.y - ICCy) ) + ICCx; 
+        pose.y = ( sin(omega * dt) * (pose.x - ICCx) ) + ( cos(omega * dt) * (pose.y - ICCy) ) + ICCy;
+  
+        pose.theta += omega * dt;    
+  
+        pose.linearVel = (right_m + left_m) / 2;
+        pose.rotVel = omega;
+     }
+     xSemaphoreGive( xMutex );
+  }
 
-      pose.theta += omega * dt;    
 
-      pose.linearVel = (right_m + left_m) / 2;
-      pose.rotVel = omega;
-   }
     // delay task 
     taskYIELD();
   }
@@ -395,7 +424,6 @@ static void TaskDiagnostic( void *pvParameters ) {
     } 
        
     // delay task 
-    //vTaskPrioritySet(xTaskHandle, 2);
     taskYIELD();
   }
 }
@@ -410,8 +438,8 @@ static void TaskProcessing ( void *pvParameters) {
     // keep CPU busy for 5ms 
     long initialTime = TIME_MS;
     while ((TIME_MS - initialTime) < CPU_BUSY_PERIOD) 
-      ;
-
+     ;
+    
     // start timer 
     xTimerStart( xProcessingTimer, 0);
     /*
@@ -509,10 +537,15 @@ static void TaskMonitor( void *pvParameters) {
       // if not above average but was flashing, continue flashing for 3 seconds, otherwise do nothing 
       if ( (flashing == 1) && (flashCount < NUM_FLASHES)) { 
           // blink LED
+          //long start2 =  xTaskGetTickCount() ;
           digitalWrite(MONITOR_LED, HIGH);
           vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
           digitalWrite(MONITOR_LED, LOW);
           vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
+          //TickType_t diff = xTaskGetTickCount() - start2;
+          //Serial.println(diff);
+          //Serial.println(diff * portTICK_PERIOD_MS);
+          
     
           // increase counter 
           flashCount++;
@@ -548,7 +581,7 @@ void breakInterruptHandler() {
     left = 0;
     right = 0;
     changeMotorSpeeds(1);
-    //logOdometry();
+    logOdometry();
     
     brakeState = 1;
 
@@ -594,12 +627,12 @@ void changeMotorSpeeds(int brake)
 {   
   // change right motor
   analogWrite(PWM_RIGHT_OUTPUT, abs(TO_PWM(right))); // speed
-  digitalWrite(DIR_RIGHT_OUTPUT, (right > 0) ? LOW : LOW); // direction
+  digitalWrite(DIR_RIGHT_OUTPUT, (right > 0) ? HIGH : LOW); // direction
   digitalWrite(BRAKE_RIGHT, brake); // don't brake 
   
   // change left motor
   analogWrite(PWM_LEFT_OUTPUT, abs(TO_PWM(left))); // speed
-  digitalWrite(DIR_LEFT_OUTPUT, (left > 0) ? LOW : LOW); // direction
+  digitalWrite(DIR_LEFT_OUTPUT, (left > 0) ? HIGH : LOW); // direction
   digitalWrite(BRAKE_LEFT, brake); // don't brake
 
 }
