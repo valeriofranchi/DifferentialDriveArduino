@@ -31,7 +31,7 @@
 #define TO_PWM(x)         map((x), -MAX_SPEED, MAX_SPEED, -PWM_MAX_SPEED, PWM_MAX_SPEED)
 #define TO_RPM(x)         map((x), -PWM_MAX_SPEED, PWM_MAX_SPEED, -MAX_SPEED, MAX_SPEED)
 
-#define DEBOUNCE_DELAY    1500 //500
+#define DEBOUNCE_DELAY    450 //500
 
 #define DIAGNOSTIC_PERIOD           2000UL
 #define SENSOR_PROCESSING_PERIOD    20UL
@@ -56,19 +56,18 @@
 #define SENSE_RIGHT        15
 #define MONITOR_LED        13
 
-unsigned stack_hwm = 0;
-
-// left and right speed
+/* left and right DC motor speeds */
 float left = 0;
 float right = 0;
 
-// arrays storing the left and right DC motor speeds 
+/* Arrays storing the left and right DC motor speeds */
 int measurementsLeft[NUMBER_MEASUREMENTS_AVERAGE];
 int measurementsRight[NUMBER_MEASUREMENTS_AVERAGE];
 
-// strings for logging data 
+/* Strings for logging data */
 const char *outputs[5]; 
 
+/* Struct for storing the pose of the vehicle */ 
 typedef struct Pose{
   float x;
   float y;
@@ -82,8 +81,6 @@ Pose pose;
 int brakeState = 0;
 int diagnosticState = 0;
 
-bool velUpdated = false;
-
 /* FreeRTOS Tasks */
 static void TaskUpdateMotorSpeeds( void *pvParameters );
 static void TaskDiagnostic( void *pvParameters );
@@ -96,107 +93,109 @@ static TaskHandle_t xTaskHandle;
 static TimerHandle_t xProcessingTimer;
 static void vProcessingTimerCallback( TimerHandle_t xTimer );
 
-// interrupt handler function 
+/* Interrupt handler functions */
 void breakInterruptHandler();
 void diagnosticInterruptHandler();
 
-SemaphoreHandle_t xMutex;
+/* Mutex for resource sharing */
+SemaphoreHandle_t xSemaphore;
 
-// debounce time for diagnostic  
+/* Debounce time for diagnostic */
 volatile unsigned long lastDebounceDiagnostic = 0;
 
 void setup() {    
-  xMutex = xSemaphoreCreateMutex();
-  // set strings for logging 
-  outputs[0] = "v: "; outputs[1] = "omega: "; outputs[2] = "x: ";
-  outputs[3] = "y: "; outputs[4] = "theta: ";                          
+  // create mutex 
+  xSemaphore = xSemaphoreCreateBinary();
+
+  // check that mutex was created correctly
+  if (xSemaphore != NULL) {
     
-  // Set input buttons
-   pinMode(INCREASE_LEFT_BUTTON, INPUT);
-   pinMode(DECREASE_LEFT_BUTTON, INPUT);
-   pinMode(INCREASE_RIGHT_BUTTON, INPUT);
-   pinMode(DECREASE_RIGHT_BUTTON, INPUT);
-   
-   // Set outputs 
-   pinMode(PWM_LEFT_OUTPUT, OUTPUT);
-   pinMode(DIR_LEFT_OUTPUT, OUTPUT);
-   pinMode(PWM_RIGHT_OUTPUT, OUTPUT);
-   pinMode(DIR_RIGHT_OUTPUT, OUTPUT);
-   pinMode(MONITOR_LED, OUTPUT);
+    // set strings for logging 
+    outputs[0] = "v: "; outputs[1] = "omega: "; outputs[2] = "x: ";
+    outputs[3] = "y: "; outputs[4] = "theta: ";                          
+      
+    // Set input buttons
+     pinMode(INCREASE_LEFT_BUTTON, INPUT);
+     pinMode(DECREASE_LEFT_BUTTON, INPUT);
+     pinMode(INCREASE_RIGHT_BUTTON, INPUT);
+     pinMode(DECREASE_RIGHT_BUTTON, INPUT);
+     
+     // Set outputs 
+     pinMode(PWM_LEFT_OUTPUT, OUTPUT);
+     pinMode(DIR_LEFT_OUTPUT, OUTPUT);
+     pinMode(PWM_RIGHT_OUTPUT, OUTPUT);
+     pinMode(DIR_RIGHT_OUTPUT, OUTPUT);
+     pinMode(MONITOR_LED, OUTPUT);
+    
+    // initialize serial communications at 9600 bps
+    Serial.begin(9600); 
   
-  // initialize serial communications at 9600 bps
-  Serial.begin(9600); 
-
-  while (!Serial)
-    ; // wait for serial port to connect
-
-  // attach interrupt handler to break button and diagnostic button
-  attachInterrupt(digitalPinToInterrupt(BRAKE_BUTTON), breakInterruptHandler, FALLING);
-  attachInterrupt(digitalPinToInterrupt(DIAGNOSTIC_MODE_BUTTON), diagnosticInterruptHandler, LOW);
-
-  // create timer 
-  xProcessingTimer = xTimerCreate(   "Processing timer",
-                                      SENSOR_PROCESSING_PERIOD,   
-                                      pdFALSE,              
-                                      ( void * ) 0,           
-                                      vProcessingTimerCallback        
-                                  );
-
-  // task for updating motor speeeds 
-  xTaskCreate(
-    TaskUpdateMotorSpeeds
-    ,  "Updated Motor Speeds"   // A name
-    ,  100  // Stack size 100
-    ,  NULL
-    ,  1  // priority
-    ,  NULL );
-
-  // task for diagnostic
+    while (!Serial)
+      ; // wait for serial port to connect
+  
+    // attach interrupt handler to break button and diagnostic button
+    attachInterrupt(digitalPinToInterrupt(BRAKE_BUTTON), breakInterruptHandler, FALLING);
+    attachInterrupt(digitalPinToInterrupt(DIAGNOSTIC_MODE_BUTTON), diagnosticInterruptHandler, LOW);    
+    
+    // create timer 
+    xProcessingTimer = xTimerCreate(   "Processing timer",          /* Timer name */
+                                        pdMS_TO_TICKS(SENSOR_PROCESSING_PERIOD),   /* Timer period */
+                                        pdFALSE,                    /* One-shot timer */
+                                        ( void * ) 0,               /* ID not used */
+                                        vProcessingTimerCallback    /* Callback function that switches priority of task */
+                                    );
+  
+    // task for updating motor speeeds 
     xTaskCreate(
-    TaskDiagnostic
-    ,  "Diagnostics"   // A name 
-    ,  87  // Stack size 87
-    ,  NULL
-    ,  1  // priority
-    ,  NULL );
-
-  // task for velocity monitoring
-   xTaskCreate(
-    TaskDeadReckoning
-    ,  "Dead Reckoning"   // A name 
-    ,  148  // Stack size 148
-    ,  NULL
-    ,  1  // priority
-    ,  NULL );  
-
-  // task for sensor processing 
-  xTaskCreate(
-    TaskProcessing
-    ,  "Sensor Processing"   // A name 
-    ,  80  // Stack size 100
-    ,  NULL
-    ,  2  // priority
-    ,  &xTaskHandle );
-
-  // task for velocity monitoring 
-  xTaskCreate(
-   TaskMonitor
-    ,  "Velocity Monitoring"   // A name 
-    ,  100  // Stack size 113
-    ,  NULL
-    ,  1  // priority
-    ,  NULL );
-
-  // start scheduler so created task start executing 
-  vTaskStartScheduler();
-
+      vMotorUpdateTask
+      ,  "Updated Motor Speeds"   /* Task name */
+      ,  100                      /* Stack size */
+      ,  NULL                     /* No parameters to pass */
+      ,  1                        /* Low priority */
+      ,  NULL );                  /* No task handler */ 
+  
+    // task for diagnostic
+      xTaskCreate(
+      vDiagnosticsTask                
+      ,  "Diagnostics"            /* Task name */
+      ,  87                       /* Stack size */
+      ,  NULL                     /* No parameters to pass */
+      ,  1                        /* Low priority */
+      ,  NULL );                  /* No task handler */ 
+  
+    // task for velocity monitoring
+     xTaskCreate(
+      vDeadReckoningTask
+      ,  "Dead Reckoning"         /* Task name */
+      ,  142                      /* Stack size */
+      ,  NULL                     /* No parameters to pass */
+      ,  1                        /* Low priority */
+      ,  NULL );                  /* No task handler */ 
+  
+    // task for sensor processing 
+    xTaskCreate(
+      vSensorProcessingTask
+      ,  "Sensor Processing"      /* Task name */
+      ,  68                       /* Stack size */
+      ,  NULL                     /* No parameters to pass */
+      ,  2                        /* High priority */
+      ,  &xTaskHandle );          /* Task handler for priority switching */
+  
+    // task for velocity monitoring 
+    xTaskCreate(
+     vVelocityMonitoringTask
+      ,  "Velocity Monitoring"      /* Task name */
+      ,  84                        /* Stack size 100*/
+      ,  NULL                       /* No parameters to pass */
+      ,  1                          /* Low priority */
+      ,  NULL );                    /* Task handler for priority switching */
+  
+    // start scheduler so created task start executing 
+    vTaskStartScheduler();
+  }
 }
 
-void loop() {  
-// Empty. Things are done in Tasks.
-}
-
-void TaskUpdateMotorSpeeds( void *pvParameters) {
+void vMotorUpdateTask( void *pvParameters) {
   (void) pvParameters;
 
   // last time buttons were triggered
@@ -207,21 +206,20 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
 
   bool speedChanged = false;
   
-  for (;;)
-  {  
-    if (xSemaphoreTake( xMutex, (TickType_t) 1 ) == pdPASS) {
-      if (brakeState == 0) {
-  
-        // check button inputs 
-        int increaseLeft = digitalRead(INCREASE_LEFT_BUTTON);
-        int decreaseLeft = digitalRead(DECREASE_LEFT_BUTTON);
-        int increaseRight = digitalRead(INCREASE_RIGHT_BUTTON);
-        int decreaseRight = digitalRead(DECREASE_RIGHT_BUTTON);
+  for (;;) {   
+    // if breaks are engaged 
+    if (brakeState == 0) {
+      
+      // check button inputs 
+      int increaseLeft = digitalRead(INCREASE_LEFT_BUTTON);
+      int decreaseLeft = digitalRead(DECREASE_LEFT_BUTTON);
+      int increaseRight = digitalRead(INCREASE_RIGHT_BUTTON);
+      int decreaseRight = digitalRead(DECREASE_RIGHT_BUTTON);
 
         // if last debounce time is more than a threshold, enter loop
         if ( ((TIME_MS - lastDebounceIncreaseLeft) > DEBOUNCE_DELAY) && (increaseLeft == LOW) ) {
+          
           // if button is pressed and break is not activated increase speed
-          Serial.println("increasing left");
           speedChanged = true;
           left += SPEED_INCREASE;   
           if (left > MAX_SPEED) 
@@ -232,8 +230,8 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
         
         // if last debounce time is more than a threshold, enter loop        
         if ( (TIME_MS - lastDebounceDecreaseLeft > DEBOUNCE_DELAY) && (decreaseLeft == LOW) ) {
+          
           // if button is pressed and break is not activated decrease speed
-          Serial.println("decreasing left");
           speedChanged = true;
           left -= SPEED_DECREASE;
           if (left < -MAX_SPEED) 
@@ -246,7 +244,6 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
         if ( ((TIME_MS - lastDebounceIncreaseRight) > DEBOUNCE_DELAY) && (increaseRight == LOW) ) {
           
           // if button is pressed and break is not activated increase speed
-          Serial.println("increasing right");
           speedChanged = true;
           right += SPEED_INCREASE;      
           if (right > MAX_SPEED) 
@@ -259,7 +256,6 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
         if ( ((TIME_MS - lastDebounceDecreaseRight) > DEBOUNCE_DELAY) && (decreaseRight == LOW) ) {
           
           // if button is pressed and break is not activated decrease speed
-          Serial.println("decreasing right");
           speedChanged = true;
           right -= SPEED_DECREASE;      
           if (right < -MAX_SPEED) 
@@ -267,43 +263,32 @@ void TaskUpdateMotorSpeeds( void *pvParameters) {
           
           lastDebounceDecreaseRight = TIME_MS;
         }
-  
+
+        // if any button has been pressed and speed has changed 
         if (speedChanged == true) {
-  
+
+            // change speed without braking, reset speed changed and print pose and velocities to terminal 
             changeMotorSpeeds(0);
-            Serial.println("logging");
             speedChanged = false;
-            //logOdometry(); 
-            //velUpdated = true;
-    
-            // unsigned temp;
-            // temp = uxTaskGetStackHighWaterMark(NULL);
-          /*
-            if (!stack_hwm || temp < stack_hwm) {
-                stack_hwm = temp;
-                Serial.print(F(", High Watermark from function1: "));
-                Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-            }  
-            */
-        }    
-      }
-      xSemaphoreGive( xMutex );
+            logOdometry();                 
+      }    
     }
-    //xSemaphoreGive( xMutex );
+    // give semaphore 
+    xSemaphoreGive( xSemaphore );
     
-    
-    
-    // delay task 
+    // yield task 
     taskYIELD();
-  } 
+  }    
 }
 
-static void TaskDeadReckoning( void * pvParameters ) {
+static void vDeadReckoningTask( void * pvParameters ) {
   (void) pvParameters;
 
+  // timestamps for pose update and last print to terminal
   long lastUpdateTime = TIME_MS;
   long lastPrintTime = TIME_MS;
 
+  // variables for pose estimation 
   float dt = 0;
   float R = 0; float omega = 0;
   float ICCx = 0; float ICCy = 0;
@@ -311,68 +296,72 @@ static void TaskDeadReckoning( void * pvParameters ) {
 
   for (;;) {
 
-    if (xSemaphoreTake( xMutex, (TickType_t) 1 ) == pdPASS) {
+    // try to take the semaphore for 1 tick 
+    if (xSemaphoreTake( xSemaphore, (TickType_t) 1 ) == pdPASS) {
     
-      // print odometry every second 
-      if ((TIME_MS - lastPrintTime) > ODOMETRY_UPDATE_TIME * 1000) {      
-       
+      // print odometry every second and update timestamp 
+      if ((TIME_MS - lastPrintTime) > ODOMETRY_UPDATE_TIME * 1000) {           
         logOdometry();
         lastPrintTime = TIME_MS;
-        //if (velUpdated)
-        //  velUpdated = !velUpdated;
       }         
         
-      // update change in time 
-      dt = (TIME_MS - lastUpdateTime) / 1000.0;
-  
       // velocities in m/s
       left_m = left * WHEEL_RADIUS;
       right_m = right * WHEEL_RADIUS;
- 
-      lastUpdateTime = TIME_MS;
-      // no rotation, movement in straight line -> limiting case, else R -> infinity 
-      if (left_m == right_m) {      
-        
-        pose.x += right_m * cos(pose.theta) * dt;
-        pose.y += right_m * sin(pose.theta) * dt;
-  
-        pose.linearVel = right;
-        pose.rotVel = 0.0;
-      } else {     
-        R = (DISTANCE_BETWEEN_WHEEL_CENTRES / 2) * ( (left_m + right_m) / (right_m - left_m) );
-        omega = (right_m - left_m) / DISTANCE_BETWEEN_WHEEL_CENTRES;
+
+    }
+
+    // update change in time 
+    dt = (TIME_MS - lastUpdateTime) / 1000.0;
+
+    // update time stamp 
+    lastUpdateTime = TIME_MS;
     
-        ICCx = pose.x - R * sin(pose.theta);
-        ICCy = pose.y + R * cos(pose.theta);
-          
-        pose.x = ( cos(omega * dt) * (pose.x - ICCx) ) + ( -sin(omega * dt) * (pose.y - ICCy) ) + ICCx; 
-        pose.y = ( sin(omega * dt) * (pose.x - ICCx) ) + ( cos(omega * dt) * (pose.y - ICCy) ) + ICCy;
-  
-        pose.theta += omega * dt;    
-  
-        pose.linearVel = (right_m + left_m) / 2;
-        pose.rotVel = omega;
-     }
-     xSemaphoreGive( xMutex );
-  }
+    // no rotation, movement in straight line -> limiting case, else R -> infinity 
+    if (left_m == right_m) {      
+      // calculate new position, and velocities (theta stays the same) 
+      pose.x += right_m * cos(pose.theta) * dt;
+      pose.y += right_m * sin(pose.theta) * dt;
 
+      pose.linearVel = right;
+      pose.rotVel = 0.0;
+    } else {     
+      // calculate new position, orientation and velocities 
+      R = (DISTANCE_BETWEEN_WHEEL_CENTRES / 2) * ( (left_m + right_m) / (right_m - left_m) );
+      omega = (right_m - left_m) / DISTANCE_BETWEEN_WHEEL_CENTRES;
+  
+      ICCx = pose.x - R * sin(pose.theta);
+      ICCy = pose.y + R * cos(pose.theta);
+        
+      pose.x = ( cos(omega * dt) * (pose.x - ICCx) ) + ( -sin(omega * dt) * (pose.y - ICCy) ) + ICCx; 
+      pose.y = ( sin(omega * dt) * (pose.x - ICCx) ) + ( cos(omega * dt) * (pose.y - ICCy) ) + ICCy;
 
-    // delay task 
-    taskYIELD();
+      pose.theta += omega * dt;    
+
+      pose.linearVel = (right_m + left_m) / 2;
+      pose.rotVel = omega;
+    }
+
+    // yield task 
+    vTaskDelay( (TickType_t) pdMS_TO_TICKS(100));
   }
 }
 
-static void TaskDiagnostic( void *pvParameters ) {
+static void vDiagnosticsTask( void *pvParameters ) {
     (void) pvParameters;
 
+    // storage for current and absolute maximums 
     uint16_t currentLeft = 0; uint16_t currentRight = 0;
     uint16_t absoluteLeft = 0; uint16_t absoluteRight = 0;   
 
+    // time stamp for last update 
     long start = TIME_MS;
     
     for (;;) {
+      // if diagnostic mode is on 
       if (diagnosticState == 1) {
 
+        // if less than 2 seconds have passed 
         if ( (TIME_MS - start) < DIAGNOSTIC_PERIOD) {
 
           // check currents in DC motors
@@ -385,7 +374,8 @@ static void TaskDiagnostic( void *pvParameters ) {
         
           if (senseRight > currentRight )
             currentRight = senseRight;
-  
+
+        // if 2 seconds have passed 
         } else {
         
           // update maximums         
@@ -409,31 +399,20 @@ static void TaskDiagnostic( void *pvParameters ) {
           currentRight = 0; 
           currentLeft = 0; 
           
-          start = TIME_MS;
-/*
-      unsigned temp;
-      temp = uxTaskGetStackHighWaterMark(NULL);
-    
-      if (!stack_hwm || temp < stack_hwm) {
-        stack_hwm = temp;
-        Serial.print(F(", High Watermark from function1: "));
-        Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-      }
-      */
+          // update time stamp 
+          start = TIME_MS;      
       }
     } 
        
-    // delay task 
+    // yield task 
     taskYIELD();
   }
 }
 
-static void TaskProcessing ( void *pvParameters) {
+static void vSensorProcessingTask ( void *pvParameters) {
   (void) pvParameters;
   
   for (;;) {
-    // stop timer
-    xTimerStop( xProcessingTimer, 0);
 
     // keep CPU busy for 5ms 
     long initialTime = TIME_MS;
@@ -441,17 +420,10 @@ static void TaskProcessing ( void *pvParameters) {
      ;
     
     // start timer 
-    xTimerStart( xProcessingTimer, 0);
-    /*
-     unsigned temp;
-      temp = uxTaskGetStackHighWaterMark(NULL);
+    if (xTimerIsTimerActive( xProcessingTimer ) != pdTRUE) {
+      xTimerStart( xProcessingTimer, 0);
+    }
     
-      if (!stack_hwm || temp < stack_hwm) {
-        stack_hwm = temp;
-        Serial.print(F(", High Watermark from function1: "));
-        Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-      }*/
-
     // set priority to 1 
     vTaskPrioritySet(NULL, 1);
   }  
@@ -460,11 +432,13 @@ static void TaskProcessing ( void *pvParameters) {
 static void vProcessingTimerCallback( TimerHandle_t xTimer ) {
   // reset priority of sensor processing to 2 after 15ms 
   static long start = TIME_MS;
-  if ( (TIME_MS - start) > (SENSOR_PROCESSING_PERIOD - CPU_BUSY_PERIOD)) 
+  if ( (TIME_MS - start) > (SENSOR_PROCESSING_PERIOD - CPU_BUSY_PERIOD)) {
     vTaskPrioritySet(xTaskHandle, 2);  
+    start = TIME_MS;
+  }
 }
 
-static void TaskMonitor( void *pvParameters) {
+static void vVelocityMonitoringTask( void *pvParameters) {
   (void) pvParameters;
 
   // initialize sums, pointer, averages and arrays
@@ -472,17 +446,20 @@ static void TaskMonitor( void *pvParameters) {
   float sumRight = 0;
   uint8_t curr = 0;
 
-  long start = 0;
+  // time stamp for last update
+  long start = 0; 
   
-  
-    // initialize 
+  // initialize velocity arrays 
   for (int i = 0; i < NUMBER_MEASUREMENTS_AVERAGE; i++) {
     measurementsLeft[i] = 0;
     measurementsRight[i] = 0;
   }
-  
+
+  // time stamp for last average update 
   long lastAverageUpdate = TIME_MS;
-  long lastFlash = TIME_MS;
+  long lastFlash = 0;
+
+  // number of flashes and boolean for flashing enabled/disabled 
   int flashCount = 0;
   bool flashing = 0;
   
@@ -491,8 +468,7 @@ static void TaskMonitor( void *pvParameters) {
     if (diagnosticState == 0) {
 
       // at 2Hz frequency update the rolling average 
-      if ( (TIME_MS - lastAverageUpdate) > ((1 / MONITOR_FREQ) * 1000)) {
-        
+      if ( (TIME_MS - lastAverageUpdate) > ((1.0 / MONITOR_FREQ) * 1000)) {
         // remove pointer element from sum
         sumLeft -= TO_RPM(measurementsLeft[curr]);
         sumRight -= TO_RPM(measurementsRight[curr]);
@@ -510,85 +486,85 @@ static void TaskMonitor( void *pvParameters) {
         if (curr >= NUMBER_MEASUREMENTS_AVERAGE) {
           curr = 0;
         }
+        
+        // update time stamp
         lastAverageUpdate = TIME_MS; 
       }
       
-      // check if rolling average is higher than maximum
-      if ((sumLeft / NUMBER_MEASUREMENTS_AVERAGE) > MAX_ROLLING_AVERAGE && ((sumRight / NUMBER_MEASUREMENTS_AVERAGE) > MAX_ROLLING_AVERAGE)) {
+      // check if rolling average is higher than maximum for both wheels 
+      if ((sumLeft / NUMBER_MEASUREMENTS_AVERAGE) > MAX_ROLLING_AVERAGE && ((sumRight / NUMBER_MEASUREMENTS_AVERAGE) > MAX_ROLLING_AVERAGE)
+        && ((TIME_MS - lastFlash) > (((1.0 / (FLASH_FREQ)) * 1000) - 50)) ) {
+        
         // blink LED
         digitalWrite(MONITOR_LED, HIGH);
-        vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
+        vTaskDelay(  pdMS_TO_TICKS( 50 ) );
         digitalWrite(MONITOR_LED, LOW);
-        vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
-/*
-           unsigned temp;
-         temp = uxTaskGetStackHighWaterMark(NULL);
+        
+        lastFlash = TIME_MS;
          
-         if (!stack_hwm || temp < stack_hwm) {
-            stack_hwm = temp;
-            Serial.print(", High Watermark from function1: ");
-            Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-         }
-         */
-
+        // update boolean 
         flashing = 1;
         
      } else {
-      // if not above average but was flashing, continue flashing for 3 seconds, otherwise do nothing 
-      if ( (flashing == 1) && (flashCount < NUM_FLASHES)) { 
-          // blink LED
-          //long start2 =  xTaskGetTickCount() ;
-          digitalWrite(MONITOR_LED, HIGH);
-          vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
-          digitalWrite(MONITOR_LED, LOW);
-          vTaskDelay(  pdMS_TO_TICKS( ((1.0 / (2.0 * FLASH_FREQ)) * 1000) ) );
-          //TickType_t diff = xTaskGetTickCount() - start2;
-          //Serial.println(diff);
-          //Serial.println(diff * portTICK_PERIOD_MS);
+        // if not above average but was flashing, continue flashing for 3 seconds, otherwise do nothing 
+        if ( (flashing == 1) && (flashCount < NUM_FLASHES) && ((TIME_MS - lastFlash) > (((1.0 / (FLASH_FREQ)) * 1000) - 50))) { 
           
+          // blink LED         
+          digitalWrite(MONITOR_LED, HIGH);
+          vTaskDelay(  pdMS_TO_TICKS( 50 ) );
+          digitalWrite(MONITOR_LED, LOW);
+  
+          // update time stamp
+          lastFlash = TIME_MS;
     
           // increase counter 
           flashCount++;
+  
+          // if flashes are over, reset variables 
           if (flashCount == NUM_FLASHES) {
             flashCount = 0;
             flashing = 0;
           }
-    
-          // update time of last blink 
-          lastFlash = TIME_MS;
-      }  
+        }  
+      }
     }
-  }
-    /*
-    unsigned temp;
-         temp = uxTaskGetStackHighWaterMark(NULL);
-         
-         if (!stack_hwm || temp < stack_hwm) {
-            stack_hwm = temp;
-            Serial.print(", High Watermark from function1: ");
-            Serial.println(stack_hwm); // https://www.freertos.org/uxTaskGetStackHighWaterMark.html
-         }
-    */
+    // yield task 
     taskYIELD();
   }
 }
 
 void breakInterruptHandler() { 
 
+  // if breaks are not engaged 
   if (brakeState == 0) {
 
-    // update state 
+    // update left and right global variables  
     left = 0;
     right = 0;
+
+    // change motor velocity and brake 
     changeMotorSpeeds(1);
-    logOdometry();
-    
+
+    // print to terminal pose and velocities 
+    //logOdometry();
+
+    // update brake state 
     brakeState = 1;
 
     // print message on terminal 
-    Serial.println("BRAKES ON");
+    Serial.println("BRAKES ON");    
+    Serial.print(outputs[0]);
+    Serial.println(pose.linearVel);
+    Serial.print(outputs[1]);
+    Serial.println(pose.rotVel);  
+    Serial.print(outputs[2]);
+    Serial.println(pose.x);
+    Serial.print(outputs[3]);
+    Serial.println(pose.y);    
+    Serial.print(outputs[4]);
+    Serial.println(pose.theta);
     
-  // disengage breaks 
+  // if breaks engaged  
   } else if (brakeState == 1) {
     
     // update state 
@@ -603,13 +579,15 @@ void diagnosticInterruptHandler() {
   // if last debounce time is more than a threshold, modify diagnostic state 
   if ( (TIME_MS - lastDebounceDiagnostic) > DEBOUNCE_DELAY ) {
     diagnosticState = !diagnosticState;
-    
+
+    // update debouncing time stamp 
     lastDebounceDiagnostic = TIME_MS;     
   }
 }
 
 void logOdometry()
 {
+  // print velocities, position and orientation 
   Serial.print(outputs[0]);
   Serial.println(pose.linearVel);
   Serial.print(outputs[1]);
@@ -628,11 +606,15 @@ void changeMotorSpeeds(int brake)
   // change right motor
   analogWrite(PWM_RIGHT_OUTPUT, abs(TO_PWM(right))); // speed
   digitalWrite(DIR_RIGHT_OUTPUT, (right > 0) ? HIGH : LOW); // direction
-  digitalWrite(BRAKE_RIGHT, brake); // don't brake 
+  digitalWrite(BRAKE_RIGHT, brake); // brake
   
   // change left motor
   analogWrite(PWM_LEFT_OUTPUT, abs(TO_PWM(left))); // speed
   digitalWrite(DIR_LEFT_OUTPUT, (left > 0) ? HIGH : LOW); // direction
-  digitalWrite(BRAKE_LEFT, brake); // don't brake
+  digitalWrite(BRAKE_LEFT, brake); // brake 
 
+}
+
+void loop() {  
+// Empty. Things are done in Tasks.
 }
